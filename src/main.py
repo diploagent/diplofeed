@@ -1,17 +1,18 @@
 """
 Complete News Summary Workflow Using LangGraph, Google Docs/Sheets, and Gmail,
-with Dynamic Configuration from a Google Sheet.
+with Dynamic Configuration from a Google Sheet and a "Run Report" toggle.
 
 This script:
-  - Loads configuration from a Google Sheet (keys: API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID,
-    EMAIL_RECIPIENTS, REPORT_NAME, etc.).
-  - Retrieves article text from one or more Google Docs.
-  - Splits the text into chunks.
-  - Uses a LangGraph workflow to send each chunk to an LLM (via OpenAI) for JSON‑formatted summarization.
-    It employs LangChain's OutputFixingParser (with a Pydantic model) to handle JSON parsing errors.
+  - Loads configuration rows from a Google Sheet.
+  - For each row with "Run Report" set to "Yes", it retrieves article text from one or more Google Docs,
+    splits the text into chunks, and uses a LangGraph workflow to summarize each chunk via an LLM.
+  - Uses LangChain's OutputFixingParser (with a Pydantic model) to robustly parse JSON output.
   - Writes the combined summary to a destination Google Doc.
   - Sends an email with the summary via the Gmail API.
 
+All dynamic parameters (including the API key, document IDs, prompts, etc.) are stored in the Google Sheet.
+The local .env file only contains the Google Sheet ID.
+  
 Author: Your Name
 Date: YYYY-MM-DD
 """
@@ -23,7 +24,7 @@ import time
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
-# Load environment variables from .env (only non-sensitive values like GOOGLE_SHEET_ID)
+# Load environment variables from .env (contains only non-sensitive info like GOOGLE_SHEET_ID)
 load_dotenv()
 
 # -------------------------------
@@ -46,15 +47,21 @@ def get_google_creds():
     return creds
 
 def load_config_from_sheet(sheet_id, creds):
+    """
+    Loads all configuration rows from the Google Sheet.
+    Assumes the sheet has a header row with columns such as:
+      Report Name, Run Report, API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID,
+      EMAIL_RECIPIENTS, SYSTEM_PROMPT, USER_PROMPT, LLM_MODEL, RUN_DAY, RUN_TIME
+    Returns a list of dictionaries, one per configuration row.
+    """
     client = gspread.authorize(creds)
-    # Open the sheet by its key.
     sheet = client.open_by_key(sheet_id).sheet1
-    # Assumes your sheet has two columns: 'Key' and 'Value'
     records = sheet.get_all_records()
-    # Create a dictionary mapping keys to values.
-    config = {record['Key']: record['Value'] for record in records}
-    return config
+    return records
 
+# -------------------------------
+# Google Docs and Gmail Functions
+# -------------------------------
 def get_doc_text(doc_id, creds):
     service = build('docs', 'v1', credentials=creds)
     doc = service.documents().get(documentId=doc_id).execute()
@@ -131,13 +138,12 @@ class Summary(BaseModel):
 from typing import TypedDict, List, Annotated
 
 class State(TypedDict):
-    # 'messages' will hold our processing messages.
     messages: Annotated[List[dict], add_messages]
 
 def summarize_chunk(state: State):
     """
-    Node function: Summarizes a text chunk using OpenAI.
-    Attempts to parse the output as JSON, and if that fails, uses OutputFixingParser
+    Summarizes a text chunk using OpenAI.
+    It tries to parse the output as JSON; if that fails, uses OutputFixingParser
     (with a Pydantic model) to fix and parse the output.
     """
     chunk = state.get("chunk", "")
@@ -146,38 +152,28 @@ def summarize_chunk(state: State):
         "\"title\" and \"summary\".\n\n"
         f"Text: {chunk}\n\nPlease output JSON only."
     )
-    # Initialize the LLM instance.
-    llm = OpenAI(api_key=os.getenv("API_KEY", ""), model="gpt4o-mini")
+    # Initialize the LLM instance using the API key from environment (set from the sheet).
+    llm = OpenAI(api_key=os.getenv("API_KEY", ""), model=state.get("LLM_MODEL", "gpt4o-mini"))
     response = llm.invoke(prompt)
     try:
         summary_obj = json.loads(response)
     except json.JSONDecodeError:
-        # Set up a Pydantic parser and OutputFixingParser to attempt a fix.
         pydantic_parser = PydanticOutputParser(pydantic_object=Summary)
         fixing_parser = OutputFixingParser.from_llm(llm, parser=pydantic_parser)
         summary_obj = fixing_parser.parse(response)
-        # If summary_obj is a Pydantic model, convert it to a dict.
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
     new_messages = state.get("messages", []) + [summary_obj]
     return {"summary": summary_obj, "messages": new_messages}
 
 def build_langgraph_workflow():
-    """
-    Builds a simple LangGraph workflow with one node for summarization.
-    """
     graph_builder = StateGraph(State)
     graph_builder.add_node("summarize", summarize_chunk)
     graph_builder.add_edge(START, "summarize")
     graph_builder.add_edge("summarize", END)
-    graph = graph_builder.compile()
-    return graph
+    return graph_builder.compile()
 
 def process_article(doc_text):
-    """
-    Processes an article by splitting the text into chunks and summarizing each chunk.
-    Returns a list of summary objects.
-    """
     summaries = []
     chunks = chunk_text(doc_text)
     graph = build_langgraph_workflow()
@@ -194,47 +190,54 @@ def main():
     # Get Google API credentials.
     creds = get_google_creds()
     
-    # Load configuration from the Google Sheet.
-    # The .env file contains GOOGLE_SHEET_ID only; other parameters are in the sheet.
+    # Load all configuration rows from the Google Sheet.
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    config_sheet = load_config_from_sheet(sheet_id, creds)
+    all_configs = load_config_from_sheet(sheet_id, creds)
     
-    # Extract dynamic configuration from the sheet.
-    # Expected keys in the sheet: API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID, EMAIL_RECIPIENTS, etc.
-    dynamic_config = config_sheet
-    # Use the API key from the sheet if provided.
-    os.environ["API_KEY"] = dynamic_config.get("API_KEY", "")
-    
-    # Get other configuration values.
-    source_doc_ids = dynamic_config.get("SOURCE_DOC_IDS", "").split(",")
-    dest_doc_id = dynamic_config.get("DEST_DOC_ID", "")
-    email_recipients = dynamic_config.get("EMAIL_RECIPIENTS", "")
-    
-    # Process each source document.
-    combined_summaries = []
-    for doc_id in source_doc_ids:
-        doc_id = doc_id.strip()
-        if not doc_id:
-            continue
-        print(f"Processing document: {doc_id}")
-        doc_text = get_doc_text(doc_id, creds)
-        summaries = process_article(doc_text)
-        # Combine summaries into a formatted string.
-        doc_summary = "\n".join([json.dumps(s, indent=2) for s in summaries])
-        combined_summaries.append(doc_summary)
-        time.sleep(1)  # Optional: pause to avoid rate limits.
-    
-    final_summary = "\n\n".join(combined_summaries)
-    print("Final summary generated:")
-    print(final_summary)
-    
-    # Write the final summary to the destination Google Doc.
-    write_summary_to_doc(dest_doc_id, final_summary, creds)
-    print("Summary written to Google Doc.")
-    
-    # Send an email with the final summary.
-    send_email("me", email_recipients, "Daily News Summary", final_summary, creds)
-    print("Email sent with the summary.")
+    # For each configuration row where "Run Report" equals "Yes", process the report.
+    for config in all_configs:
+        run_toggle = config.get("Run Report", "").strip().lower()
+        if run_toggle != "yes":
+            continue  # Skip this configuration if not toggled on.
+        
+        print(f"Running report: {config.get('Report Name', 'Unnamed Report')}")
+        
+        # Set dynamic configurations from the sheet.
+        # For example, override API_KEY and LLM_MODEL:
+        os.environ["API_KEY"] = config.get("API_KEY", os.getenv("API_KEY", ""))
+        # (You can similarly override system prompt, user prompt, etc. if your workflow uses them.)
+        
+        # Parse SOURCE_DOC_IDS (assumed to be comma-separated).
+        source_doc_ids = config.get("SOURCE_DOC_IDS", "").split(",")
+        dest_doc_id = config.get("DEST_DOC_ID", "")
+        email_recipients = config.get("EMAIL_RECIPIENTS", "")
+        # Optionally, you might also use REPORT_NAME, RUN_DAY, RUN_TIME for scheduling.
+        
+        combined_summaries = []
+        for doc_id in source_doc_ids:
+            doc_id = doc_id.strip()
+            if not doc_id:
+                continue
+            print(f"Processing document: {doc_id}")
+            doc_text = get_doc_text(doc_id, creds)
+            summaries = process_article(doc_text)
+            doc_summary = "\n".join([json.dumps(s, indent=2) for s in summaries])
+            combined_summaries.append(doc_summary)
+            time.sleep(1)  # Optional pause to avoid rate limits.
+        final_summary = "\n\n".join(combined_summaries)
+        print("Final summary generated:")
+        print(final_summary)
+        
+        # Write summary to the destination Google Doc.
+        write_summary_to_doc(dest_doc_id, final_summary, creds)
+        print("Summary written to Google Doc.")
+        
+        # Send an email with the final summary.
+        send_email("me", email_recipients, f"{config.get('Report Name', 'Report')} - Daily News Summary", final_summary, creds)
+        print("Email sent with the summary.")
+        print("-" * 60)
+        # Optionally, update the sheet to mark the report as completed, etc.
+        time.sleep(2)
 
 if __name__ == '__main__':
     main()
