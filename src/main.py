@@ -1,11 +1,19 @@
 """
 Complete News Summary Workflow Using LangGraph, Google Docs/Sheets, and Gmail,
-with robust JSON output parsing using LangChain's OutputFixingParser.
+with Dynamic Configuration from a Google Sheet.
+
+This script:
+  - Loads configuration from a Google Sheet (keys: API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID,
+    EMAIL_RECIPIENTS, REPORT_NAME, etc.).
+  - Retrieves article text from one or more Google Docs.
+  - Splits the text into chunks.
+  - Uses a LangGraph workflow to send each chunk to an LLM (via OpenAI) for JSON‑formatted summarization.
+    It employs LangChain's OutputFixingParser (with a Pydantic model) to handle JSON parsing errors.
+  - Writes the combined summary to a destination Google Doc.
+  - Sends an email with the summary via the Gmail API.
+
 Author: Your Name
 Date: YYYY-MM-DD
-Description: This script loads configuration from a Google Sheet, retrieves article text from one or more Google Docs,
-chunks and summarizes the text via an LLM (using a LangGraph workflow with output-fixing),
-writes the summary to a destination Google Doc, and sends an email with the summary.
 """
 
 import os
@@ -15,7 +23,7 @@ import time
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load environment variables from .env (only non-sensitive values like GOOGLE_SHEET_ID)
 load_dotenv()
 
 # -------------------------------
@@ -26,20 +34,25 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 def get_google_creds():
+    # Define the scopes for Sheets, Drive, Docs, and Gmail.
     scope = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/documents',
         'https://www.googleapis.com/auth/gmail.send'
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    # Load credentials from the service account file in the config folder.
+    creds = ServiceAccountCredentials.from_json_keyfile_name('config/service_account.json', scope)
     return creds
 
-def load_config(sheet_id, creds):
+def load_config_from_sheet(sheet_id, creds):
     client = gspread.authorize(creds)
+    # Open the sheet by its key.
     sheet = client.open_by_key(sheet_id).sheet1
-    # Assumes a header row and one configuration row
-    config = sheet.get_all_records()[0]
+    # Assumes your sheet has two columns: 'Key' and 'Value'
+    records = sheet.get_all_records()
+    # Create a dictionary mapping keys to values.
+    config = {record['Key']: record['Value'] for record in records}
     return config
 
 def get_doc_text(doc_id, creds):
@@ -64,7 +77,7 @@ def write_summary_to_doc(doc_id, summary, creds):
     result = service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_body}).execute()
     return result
 
-def create_message(sender, to, subject, message_text):
+def create_email_message(sender, to, subject, message_text):
     message = MIMEText(message_text)
     message['to'] = to
     message['from'] = sender
@@ -75,7 +88,7 @@ def create_message(sender, to, subject, message_text):
 def send_email(sender, recipients, subject, message_text, creds):
     service = build('gmail', 'v1', credentials=creds)
     for recipient in recipients.split(","):
-        message = create_message(sender, recipient.strip(), subject, message_text)
+        message = create_email_message(sender, recipient.strip(), subject, message_text)
         service.users().messages().send(userId="me", body=message).execute()
     return
 
@@ -88,7 +101,7 @@ def chunk_text(text, max_length=3000):
     current = []
     current_length = 0
     for word in words:
-        current_length += len(word) + 1  # plus space
+        current_length += len(word) + 1  # Account for space
         current.append(word)
         if current_length >= max_length:
             chunks.append(" ".join(current))
@@ -105,11 +118,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_openai import OpenAI
 
-# For robust JSON parsing, we use LangChain's OutputFixingParser.
+# Use pydantic and LangChain's output parser for robust JSON parsing.
 from pydantic import BaseModel
 from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 
-# Define a Pydantic model for the summary output.
+# Define a Pydantic model for the expected summary output.
 class Summary(BaseModel):
     title: str
     summary: str
@@ -124,9 +137,8 @@ class State(TypedDict):
 def summarize_chunk(state: State):
     """
     Node function: Summarizes a text chunk using OpenAI.
-    It first tries to parse the LLM response as JSON.
-    If that fails, it uses LangChain's OutputFixingParser (with a Pydantic model)
-    to correct and parse the output.
+    Attempts to parse the output as JSON, and if that fails, uses OutputFixingParser
+    (with a Pydantic model) to fix and parse the output.
     """
     chunk = state.get("chunk", "")
     prompt = (
@@ -134,17 +146,17 @@ def summarize_chunk(state: State):
         "\"title\" and \"summary\".\n\n"
         f"Text: {chunk}\n\nPlease output JSON only."
     )
-    # Create the LLM instance.
-    llm = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), model="gpt4o-mini")
+    # Initialize the LLM instance.
+    llm = OpenAI(api_key=os.getenv("API_KEY", ""), model="gpt4o-mini")
     response = llm.invoke(prompt)
     try:
         summary_obj = json.loads(response)
     except json.JSONDecodeError:
-        # Use LangChain's OutputFixingParser for robust JSON parsing.
+        # Set up a Pydantic parser and OutputFixingParser to attempt a fix.
         pydantic_parser = PydanticOutputParser(pydantic_object=Summary)
         fixing_parser = OutputFixingParser.from_llm(llm, parser=pydantic_parser)
         summary_obj = fixing_parser.parse(response)
-        # Convert Pydantic model to dict if necessary.
+        # If summary_obj is a Pydantic model, convert it to a dict.
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
     new_messages = state.get("messages", []) + [summary_obj]
@@ -182,25 +194,36 @@ def main():
     # Get Google API credentials.
     creds = get_google_creds()
     
-    # Load configuration from your Google Sheet.
-    google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    config = load_config(google_sheet_id, creds)
+    # Load configuration from the Google Sheet.
+    # The .env file contains GOOGLE_SHEET_ID only; other parameters are in the sheet.
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    config_sheet = load_config_from_sheet(sheet_id, creds)
     
-    # Get settings from .env (or override from sheet if needed).
-    source_doc_ids = os.getenv("SOURCE_DOC_IDS").split(",")
-    dest_doc_id = os.getenv("DEST_DOC_ID")
-    email_recipients = os.getenv("EMAIL_RECIPIENTS")
+    # Extract dynamic configuration from the sheet.
+    # Expected keys in the sheet: API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID, EMAIL_RECIPIENTS, etc.
+    dynamic_config = config_sheet
+    # Use the API key from the sheet if provided.
+    os.environ["API_KEY"] = dynamic_config.get("API_KEY", "")
+    
+    # Get other configuration values.
+    source_doc_ids = dynamic_config.get("SOURCE_DOC_IDS", "").split(",")
+    dest_doc_id = dynamic_config.get("DEST_DOC_ID", "")
+    email_recipients = dynamic_config.get("EMAIL_RECIPIENTS", "")
     
     # Process each source document.
     combined_summaries = []
     for doc_id in source_doc_ids:
-        print(f"Processing document: {doc_id.strip()}")
-        doc_text = get_doc_text(doc_id.strip(), creds)
+        doc_id = doc_id.strip()
+        if not doc_id:
+            continue
+        print(f"Processing document: {doc_id}")
+        doc_text = get_doc_text(doc_id, creds)
         summaries = process_article(doc_text)
-        # Combine the summary JSON objects into a formatted string.
+        # Combine summaries into a formatted string.
         doc_summary = "\n".join([json.dumps(s, indent=2) for s in summaries])
         combined_summaries.append(doc_summary)
-        time.sleep(1)  # Optional pause to avoid rate limits.
+        time.sleep(1)  # Optional: pause to avoid rate limits.
+    
     final_summary = "\n\n".join(combined_summaries)
     print("Final summary generated:")
     print(final_summary)
