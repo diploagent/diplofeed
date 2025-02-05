@@ -22,10 +22,6 @@ import json
 import base64
 import time
 from email.mime.text import MIMEText
-from dotenv import load_dotenv
-
-# Load environment variables from .env (contains only non-sensitive info like GOOGLE_SHEET_ID)
-load_dotenv()
 
 # -------------------------------
 # Google API Setup
