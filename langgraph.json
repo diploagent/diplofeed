@@ -1,7 +1,9 @@
 {
-  "dependencies": ["./src"],
   "graphs": {
-    "news_summary": "./src/main.py:main"
+    "news_summary": "./src/main.py:graph"
   },
-  "env": ".env"
+  "python_version": "3.11",
+  "dependencies": [
+    "./src"
+  ]
 }
