@@ -1,7 +1,0 @@
-{
-  "dependencies": ["./src"],
-  "graphs": {
-    "news_summary": "./src/main.py:main"
-  },
-  "env": ".env"
-}
