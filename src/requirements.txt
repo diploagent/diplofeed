@@ -1,6 +1,6 @@
-langgraph>=0.2.56,<0.3.0
-langchain-openai
 gspread
-google-api-python-client
 oauth2client
+google-api-python-client
+langgraph
+langchain_openai
 pydantic
