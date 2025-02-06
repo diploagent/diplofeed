@@ -199,16 +199,13 @@ def main():
         print(f"Running report: {config.get('Report Name', 'Unnamed Report')}")
         
         # Set dynamic configurations from the sheet.
-        # For example, override API_KEY and LLM_MODEL:
         os.environ["API_KEY"] = config.get("API_KEY", os.getenv("API_KEY", ""))
-        # (You can similarly override system prompt, user prompt, etc. if your workflow uses them.)
-        
+
         # Parse SOURCE_DOC_IDS (assumed to be comma-separated).
         source_doc_ids = config.get("SOURCE_DOC_IDS", "").split(",")
         dest_doc_id = config.get("DEST_DOC_ID", "")
         email_recipients = config.get("EMAIL_RECIPIENTS", "")
-        # Optionally, you might also use REPORT_NAME, RUN_DAY, RUN_TIME for scheduling.
-        
+
         combined_summaries = []
         for doc_id in source_doc_ids:
             doc_id = doc_id.strip()
@@ -220,6 +217,7 @@ def main():
             doc_summary = "\n".join([json.dumps(s, indent=2) for s in summaries])
             combined_summaries.append(doc_summary)
             time.sleep(1)  # Optional pause to avoid rate limits.
+
         final_summary = "\n\n".join(combined_summaries)
         print("Final summary generated:")
         print(final_summary)
@@ -232,8 +230,13 @@ def main():
         send_email("me", email_recipients, f"{config.get('Report Name', 'Report')} - Daily News Summary", final_summary, creds)
         print("Email sent with the summary.")
         print("-" * 60)
-        # Optionally, update the sheet to mark the report as completed, etc.
         time.sleep(2)
+
+# ------------------------------------------------------
+#  ADD THIS GLOBAL VARIABLE TO EXPORT A 'graph' OBJECT
+# ------------------------------------------------------
+graph = build_langgraph_workflow()
 
 if __name__ == '__main__':
     main()
+
