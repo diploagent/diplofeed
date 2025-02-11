@@ -2,6 +2,10 @@
   "graphs": {
     "news_summary": "./src/main.py:graph"
   },
+  "default_input": {
+    "chunk": "${SYSTEM_PROMPT}\n${USER_PROMPT}",
+    "messages": []
+  },
   "python_version": "3.11",
   "dependencies": [
     "./src"
