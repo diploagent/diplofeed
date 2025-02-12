@@ -142,11 +142,12 @@ def summarize_chunk(state: State):
     It tries to parse the output as JSON; if that fails, uses OutputFixingParser
     (with a Pydantic model) to fix and parse the output.
     """
+
     chunk = state.get("chunk", "")
 
     # 🔍 Ensure we are using the API Key from Google Sheet config (retrieved earlier in main)
-    api_key = state.get("API_KEY", os.getenv("API_KEY", ""))  # API key should have been set dynamically
-    llm_model = state.get("LLM_MODEL", "gpt-4o-mini")  # Default model in case it's not set
+    api_key = state.get("API_KEY", os.getenv("API_KEY", ""))  
+    llm_model = state.get("LLM_MODEL", "gpt-4o-mini")  
 
     # ✅ Ensure we are using the dynamically retrieved SYSTEM_PROMPT and USER_PROMPT
     system_prompt = state.get("SYSTEM_PROMPT", "Default system prompt")
@@ -171,13 +172,13 @@ def summarize_chunk(state: State):
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
 
-    # ✅ Ensure messages are updated correctly (Fix for InvalidUpdateError)
-    new_messages = state.get("messages", []) + [{"role": "assistant", "content": summary_obj}]
+    # ✅ FINAL FIX: Ensure messages follow the required LangGraph format
+    new_messages = state.get("messages", []) + [{"role": "assistant", "content": json.dumps(summary_obj)}]
 
     return {
-        "summary": summary_obj,
-        "messages": new_messages
+        "messages": new_messages  # ✅ Now always updating 'messages'
     }
+
 
 def build_langgraph_workflow():
     graph_builder = StateGraph(State)
