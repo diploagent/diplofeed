@@ -1,19 +1,3 @@
-"""
-Complete News Summary Workflow Using LangGraph, Google Docs/Sheets, and Gmail,
-with Dynamic Configuration from a Google Sheet and a "Run Report" toggle.
-
-This script:
-  - Loads configuration rows from a Google Sheet.
-  - For each row with "Run Report" set to "Yes", it retrieves article text from one or more Google Docs,
-    splits the text into chunks, and uses a LangGraph workflow to summarize each chunk via an LLM.
-  - Uses LangChain's OutputFixingParser (with a Pydantic model) to robustly parse JSON output.
-  - Writes the combined summary to a destination Google Doc.
-  - Sends an email with the summary via the Gmail API.
-
-All dynamic parameters (including the API key, document IDs, prompts, etc.) are stored in the Google Sheet.
-The local .env file only contains the Google Sheet ID.
-"""
-
 import os
 import json
 import base64
@@ -112,12 +96,19 @@ from pydantic import BaseModel
 from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 from typing import TypedDict, List, Annotated
 
+# Extended State definition to include all keys used in the workflow.
+class State(TypedDict, total=False):
+    chunk: str
+    messages: Annotated[List[dict], add_messages]
+    API_KEY: str
+    LLM_MODEL: str
+    SYSTEM_PROMPT: str
+    USER_PROMPT: str
+    summary: dict
+
 class Summary(BaseModel):
     title: str
     summary: str
-
-class State(TypedDict):
-    messages: Annotated[List[dict], add_messages]
 
 def summarize_chunk(state: State):
     """
@@ -148,18 +139,19 @@ def summarize_chunk(state: State):
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
 
-    # ✅ Ensure messages always update to prevent errors
+    # Update messages to ensure proper state propagation and capture output
     new_messages = state.get("messages", []) + [{"role": "assistant", "content": json.dumps(summary_obj)}]
 
     return {
-        "messages": new_messages
+        "messages": new_messages,
+        "summary": summary_obj  # Now returned so that the caller can use the summary result
     }
 
 def build_langgraph_workflow():
     graph_builder = StateGraph(State)
     graph_builder.add_node("summarize", summarize_chunk)
 
-    # ✅ Force execution to move to 'summarize' instead of looping at '__start__'
+    # Force execution to move to 'summarize' instead of looping at '__start__'
     graph_builder.set_entry_point("summarize")  # Ensures 'summarize' is the first step after start
 
     graph_builder.add_edge("summarize", END)  # Ensures execution completes properly
@@ -195,24 +187,24 @@ def main():
         api_key = config.get("API_KEY", os.getenv("API_KEY", ""))
         llm_model = config.get("LLM_MODEL", "gpt-4o-mini")
 
-        # ✅ Ensure messages has a valid starting value
+        # Ensure messages has a valid starting value to avoid any state issues.
         initial_state = {
             "chunk": f"{system_prompt}\n{user_prompt}",
-            "messages": [{"role": "system", "content": f"Starting execution for {report_name}"}],  # ✅ Fixes looping issue
+            "messages": [{"role": "system", "content": f"Starting execution for {report_name}"}],
             "API_KEY": api_key,
             "LLM_MODEL": llm_model,
             "SYSTEM_PROMPT": system_prompt,
             "USER_PROMPT": user_prompt
         }
 
-        print("🚀 Invoking graph with initial state:", json.dumps(initial_state, indent=2))  # Debugging print
+        print("🚀 Invoking graph with initial state:", json.dumps(initial_state, indent=2))
 
-        # 🚀 Invoke the graph
+        # Invoke the graph workflow
         result = graph.invoke(initial_state)
         print("✅ Execution completed!")
         print(result)
 
-# Ensure graph is exposed for LangGraph platform
+# Ensure the graph is exposed for the LangGraph platform
 graph = build_langgraph_workflow()
 
 if __name__ == '__main__':
