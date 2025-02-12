@@ -179,7 +179,7 @@ def main():
     creds = get_google_creds()
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
 
-    # Retrieve all reports from Google Sheet
+    # Retrieve all reports from the Google Sheet
     all_configs = load_config_from_sheet(sheet_id, creds)
 
     for config in all_configs:
@@ -193,17 +193,19 @@ def main():
         api_key = config.get("API_KEY", os.getenv("API_KEY", ""))
         llm_model = config.get("LLM_MODEL", "gpt-4o-mini")
 
-        # ✅ Ensure initial state is properly formatted
+        # ✅ FINAL FIX: Ensure messages has a valid starting value
         initial_state = {
             "chunk": f"{system_prompt}\n{user_prompt}",
-            "messages": [{"role": "system", "content": "Starting LangGraph execution..."}],
+            "messages": [{"role": "system", "content": f"Starting execution for {report_name}"}],  # ✅ Ensures a valid update
             "API_KEY": api_key,
             "LLM_MODEL": llm_model,
             "SYSTEM_PROMPT": system_prompt,
             "USER_PROMPT": user_prompt
         }
 
-        # 🚀 Invoke the graph
+        print("🚀 Invoking graph with initial state:", json.dumps(initial_state, indent=2))  # Debugging print
+
+        # 🚀 Invoke the graph (should now proceed past __start__)
         result = graph.invoke(initial_state)
         print("✅ Execution completed!")
         print(result)
