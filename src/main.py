@@ -143,14 +143,25 @@ def summarize_chunk(state: State):
     (with a Pydantic model) to fix and parse the output.
     """
     chunk = state.get("chunk", "")
-    prompt = (
-        "You are an expert news summarizer. Summarize the following text into a JSON object with keys "
-        "\"title\" and \"summary\".\n\n"
-        f"Text: {chunk}\n\nPlease output JSON only."
-    )
-    # Initialize the LLM instance using the API key from environment (set from the sheet).
-    llm = OpenAI(api_key=os.getenv("API_KEY", ""), model=state.get("LLM_MODEL", "gpt4o-mini"))
-    response = llm.invoke(prompt)
+
+    # 🔍 Ensure we are using the API Key from Google Sheet config (retrieved earlier in main)
+    api_key = state.get("API_KEY", os.getenv("API_KEY", ""))  # API key should have been set dynamically
+    llm_model = state.get("LLM_MODEL", "gpt-4o-mini")  # Default model in case it's not set
+
+    # ✅ Ensure we are using the dynamically retrieved SYSTEM_PROMPT and USER_PROMPT
+    system_prompt = state.get("SYSTEM_PROMPT", "Default system prompt")
+    user_prompt = state.get("USER_PROMPT", "Default user prompt")
+
+    # 🔹 Construct the full prompt using both system and user prompts
+    full_prompt = f"{system_prompt}\n{user_prompt}\n\nSummarize the following text into a JSON object with keys \"title\" and \"summary\":\n\n{chunk}\n\nPlease output JSON only."
+
+    # 🔹 Initialize the LLM instance with the dynamically loaded API key
+    llm = OpenAI(api_key=api_key, model=llm_model)
+
+    # 🔹 Invoke the model
+    response = llm.invoke(full_prompt)
+
+    # 🔍 Attempt to parse response into structured JSON
     try:
         summary_obj = json.loads(response)
     except json.JSONDecodeError:
@@ -159,8 +170,14 @@ def summarize_chunk(state: State):
         summary_obj = fixing_parser.parse(response)
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
-    new_messages = state.get("messages", []) + [summary_obj]
-    return {"summary": summary_obj, "messages": new_messages}
+
+    # ✅ Ensure messages are updated correctly (Fix for InvalidUpdateError)
+    new_messages = state.get("messages", []) + [{"role": "assistant", "content": summary_obj}]
+
+    return {
+        "summary": summary_obj,
+        "messages": new_messages
+    }
 
 def build_langgraph_workflow():
     graph_builder = StateGraph(State)
