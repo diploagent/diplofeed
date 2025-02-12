@@ -12,9 +12,6 @@ This script:
 
 All dynamic parameters (including the API key, document IDs, prompts, etc.) are stored in the Google Sheet.
 The local .env file only contains the Google Sheet ID.
-  
-Author: Your Name
-Date: YYYY-MM-DD
 """
 
 import os
@@ -31,25 +28,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 def get_google_creds():
-    # Define the scopes for Sheets, Drive, Docs, and Gmail.
     scope = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/documents',
         'https://www.googleapis.com/auth/gmail.send'
     ]
-    # Load credentials from the service account file in the config folder.
     creds = ServiceAccountCredentials.from_json_keyfile_name('config/service_account.json', scope)
     return creds
 
 def load_config_from_sheet(sheet_id, creds):
-    """
-    Loads all configuration rows from the Google Sheet.
-    Assumes the sheet has a header row with columns such as:
-      Report Name, Run Report, API_KEY, SOURCE_DOC_IDS, DEST_DOC_ID,
-      EMAIL_RECIPIENTS, SYSTEM_PROMPT, USER_PROMPT, LLM_MODEL, RUN_DAY, RUN_TIME
-    Returns a list of dictionaries, one per configuration row.
-    """
     client = gspread.authorize(creds)
     sheet = client.open_by_key(sheet_id).sheet1
     records = sheet.get_all_records()
@@ -70,7 +58,7 @@ def get_doc_text(doc_id, creds):
     return text
 
 def write_summary_to_doc(doc_id, summary, creds):
-    service = build('docs', 'v1', credentials=cres)
+    service = build('docs', 'v1', credentials=creds)
     requests_body = [{
         'insertText': {
             'location': {'index': 1},
@@ -104,7 +92,7 @@ def chunk_text(text, max_length=3000):
     current = []
     current_length = 0
     for word in words:
-        current_length += len(word) + 1  # Account for space
+        current_length += len(word) + 1
         current.append(word)
         if current_length >= max_length:
             chunks.append(" ".join(current))
@@ -120,18 +108,13 @@ def chunk_text(text, max_length=3000):
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_openai import OpenAI
-
-# Use pydantic and LangChain's output parser for robust JSON parsing.
 from pydantic import BaseModel
 from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from typing import TypedDict, List, Annotated
 
-# Define a Pydantic model for the expected summary output.
 class Summary(BaseModel):
     title: str
     summary: str
-
-# Define a state schema using TypedDict.
-from typing import TypedDict, List, Annotated
 
 class State(TypedDict):
     messages: Annotated[List[dict], add_messages]
@@ -139,30 +122,23 @@ class State(TypedDict):
 def summarize_chunk(state: State):
     """
     Summarizes a text chunk using OpenAI.
-    It tries to parse the output as JSON; if that fails, uses OutputFixingParser
-    (with a Pydantic model) to fix and parse the output.
     """
-
     chunk = state.get("chunk", "")
 
-    # 🔍 Ensure we are using the API Key from Google Sheet config (retrieved earlier in main)
+    # Retrieve API Key and Prompts from the state (previously set from Google Sheet)
     api_key = state.get("API_KEY", os.getenv("API_KEY", ""))  
     llm_model = state.get("LLM_MODEL", "gpt-4o-mini")  
-
-    # ✅ Ensure we are using the dynamically retrieved SYSTEM_PROMPT and USER_PROMPT
     system_prompt = state.get("SYSTEM_PROMPT", "Default system prompt")
     user_prompt = state.get("USER_PROMPT", "Default user prompt")
 
-    # 🔹 Construct the full prompt using both system and user prompts
-    full_prompt = f"{system_prompt}\n{user_prompt}\n\nSummarize the following text into a JSON object with keys \"title\" and \"summary\":\n\n{chunk}\n\nPlease output JSON only."
+    # Construct the full prompt
+    full_prompt = f"{system_prompt}\n{user_prompt}\n\nSummarize the following text:\n\n{chunk}\n\nOutput JSON only."
 
-    # 🔹 Initialize the LLM instance with the dynamically loaded API key
+    # Invoke the model
     llm = OpenAI(api_key=api_key, model=llm_model)
-
-    # 🔹 Invoke the model
     response = llm.invoke(full_prompt)
 
-    # 🔍 Attempt to parse response into structured JSON
+    # Parse response into structured JSON
     try:
         summary_obj = json.loads(response)
     except json.JSONDecodeError:
@@ -172,18 +148,17 @@ def summarize_chunk(state: State):
         if hasattr(summary_obj, "dict"):
             summary_obj = summary_obj.dict()
 
-    # ✅ FINAL FIX: Ensure messages follow the required LangGraph format
+    # ✅ Ensure messages always update to prevent errors
     new_messages = state.get("messages", []) + [{"role": "assistant", "content": json.dumps(summary_obj)}]
 
     return {
-        "messages": new_messages  # ✅ Now always updating 'messages'
+        "messages": new_messages
     }
-
 
 def build_langgraph_workflow():
     graph_builder = StateGraph(State)
     graph_builder.add_node("summarize", summarize_chunk)
-    graph_builder.add_edge(START, "summarize")
+    graph_builder.add_edge(START, "summarize")  # Ensure execution moves forward
     graph_builder.add_edge("summarize", END)
     return graph_builder.compile()
 
@@ -193,6 +168,48 @@ def process_article(doc_text):
     graph = build_langgraph_workflow()
     for chunk in chunks:
         state = {"chunk": chunk, "messages": []}
-        result = graph.invoke(state
-::contentReference[oaicite:0]{index=0}
- 
+        result = graph.invoke(state)
+        summaries.append(result.get("summary"))
+    return summaries
+
+# -------------------------------
+# Main Workflow Execution
+# -------------------------------
+def main():
+    creds = get_google_creds()
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+
+    # Retrieve all reports from Google Sheet
+    all_configs = load_config_from_sheet(sheet_id, creds)
+
+    for config in all_configs:
+        if config.get("Run Report", "").strip().lower() != "yes":
+            continue  
+
+        report_name = config.get("Report Name", "Unnamed Report")
+        print(f"🔍 Running report: {report_name}")
+
+        system_prompt, user_prompt = config.get("SYSTEM_PROMPT", ""), config.get("USER_PROMPT", "")
+        api_key = config.get("API_KEY", os.getenv("API_KEY", ""))
+        llm_model = config.get("LLM_MODEL", "gpt-4o-mini")
+
+        # ✅ Ensure initial state is properly formatted
+        initial_state = {
+            "chunk": f"{system_prompt}\n{user_prompt}",
+            "messages": [{"role": "system", "content": "Starting LangGraph execution..."}],
+            "API_KEY": api_key,
+            "LLM_MODEL": llm_model,
+            "SYSTEM_PROMPT": system_prompt,
+            "USER_PROMPT": user_prompt
+        }
+
+        # 🚀 Invoke the graph
+        result = graph.invoke(initial_state)
+        print("✅ Execution completed!")
+        print(result)
+
+# Ensure graph is exposed for LangGraph platform
+graph = build_langgraph_workflow()
+
+if __name__ == '__main__':
+    main()
